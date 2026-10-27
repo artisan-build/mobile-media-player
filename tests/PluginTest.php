@@ -70,6 +70,12 @@ describe('Plugin Manifest', function () {
         expect($names)->toContain('com.nativephp.plugins.media_player.FullscreenPlayerActivity');
     });
 
+    it('declares iOS background audio', function () {
+        $manifest = json_decode(file_get_contents($this->manifestPath), true);
+
+        expect($manifest['ios']['info_plist']['UIBackgroundModes'])->toContain('audio');
+    });
+
     it('registers events', function () {
         $manifest = json_decode(file_get_contents($this->manifestPath), true);
 

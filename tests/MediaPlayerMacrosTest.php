@@ -50,6 +50,20 @@ describe('withPlaybackStatus()', function () {
 });
 
 describe('assertPlayed()', function () {
+    it('passes Now Playing metadata to the native bridge', function () {
+        (new MediaPlayer)->play('story.mp3', [
+            'title' => 'The Moonlit Path',
+            'artist' => 'Fable House',
+            'artwork' => 'https://example.com/cover.jpg',
+        ]);
+
+        $this->bridge->assertCalled('MediaPlayer.Play', fn (array $parameters) =>
+            $parameters['title'] === 'The Moonlit Path'
+            && $parameters['artist'] === 'Fable House'
+            && $parameters['artwork'] === 'https://example.com/cover.jpg'
+        );
+    });
+
     it('passes when any source was played', function () {
         (new MediaPlayer)->play('anything.mp3');
 

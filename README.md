@@ -36,6 +36,9 @@ MediaPlayer::play(storage_path('app/theme.mp3'));
 MediaPlayer::play('https://example.com/stream.mp3', [
     'loop' => true,
     'volume' => 0.5,
+    'title' => 'The Moonlit Path',
+    'artist' => 'Fable House',
+    'artwork' => 'https://example.com/cover.jpg',
 ]);
 
 // Transport controls
@@ -52,6 +55,14 @@ $status = MediaPlayer::getStatus();
 
 `play()` and `present()` return `false` when the source can't be started (or when
 running outside the native runtime).
+
+On iOS, shared-player audio continues when the app goes into the background or
+the screen locks. The title, artist, artwork, duration and current position are
+shown in Now Playing. Lock Screen and Control Center controls can play, pause,
+skip 15 seconds in either direction and scrub to a new position. `title`,
+`artist` and `artwork` are optional; `artwork` accepts an HTTP(S) or file URL.
+Android accepts these options but does not yet provide background playback or a
+media notification.
 
 ### Full-screen system player
 

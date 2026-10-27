@@ -16,6 +16,9 @@ enum MediaPlayerFunctions {
     ///   - source: string - File path or URL to play
     ///   - loop: (optional) boolean - Restart playback when the item ends (default: false)
     ///   - volume: (optional) float - Playback volume 0.0 - 1.0 (default: 1.0)
+    ///   - title: (optional) string - Title shown by Now Playing
+    ///   - artist: (optional) string - Artist shown by Now Playing
+    ///   - artwork: (optional) string - Artwork URL shown by Now Playing
     /// Returns:
     ///   - success: boolean - True if playback started
     /// Events:
@@ -29,6 +32,9 @@ enum MediaPlayerFunctions {
 
             let loop = parameters["loop"] as? Bool ?? false
             let volume = (parameters["volume"] as? NSNumber)?.floatValue ?? 1.0
+            let title = parameters["title"] as? String
+            let artist = parameters["artist"] as? String
+            let artwork = parameters["artwork"] as? String
 
             print("🎬 Starting media playback: \(source)")
 
@@ -36,7 +42,14 @@ enum MediaPlayerFunctions {
             let semaphore = DispatchSemaphore(value: 0)
 
             DispatchQueue.main.async {
-                success = MediaPlayerManager.shared.play(source: source, loop: loop, volume: volume)
+                success = MediaPlayerManager.shared.play(
+                    source: source,
+                    loop: loop,
+                    volume: volume,
+                    title: title,
+                    artist: artist,
+                    artwork: artwork
+                )
                 semaphore.signal()
             }
 

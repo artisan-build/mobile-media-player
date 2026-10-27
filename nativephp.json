@@ -78,7 +78,11 @@
     },
     "ios": {
         "min_version": "16.0",
-        "info_plist": {},
+        "info_plist": {
+            "UIBackgroundModes": [
+                "audio"
+            ]
+        },
         "dependencies": {
             "swift_packages": [],
             "pods": []

@@ -1,5 +1,7 @@
 import AVFoundation
 import Foundation
+import MediaPlayer
+import UIKit
 
 /// MediaPlayerManager owns the shared AVPlayer used by the headless
 /// `MediaPlayer.*` bridge functions and by the `video_player` element
@@ -36,9 +38,18 @@ final class MediaPlayerManager: NSObject {
     private var endObserver: NSObjectProtocol?
     private var failObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
+    private var timeObserver: Any?
+    private var interruptionObserver: NSObjectProtocol?
+    private var shouldResumeAfterInterruption = false
+    private var nowPlayingTitle: String?
+    private var nowPlayingArtist: String?
+    private var nowPlayingArtwork: MPMediaItemArtwork?
+    private var artworkGeneration = 0
 
     private override init() {
         super.init()
+        configureRemoteCommands()
+        observeAudioInterruptions()
     }
 
     // MARK: - Playback control
@@ -46,12 +57,23 @@ final class MediaPlayerManager: NSObject {
     /// Start (or replace) playback. Returns false when the source can't be
     /// resolved to a URL or the player can't be created.
     @discardableResult
-    func play(source: String, loop: Bool, volume: Float) -> Bool {
+    func play(
+        source: String,
+        loop: Bool,
+        volume: Float,
+        title: String? = nil,
+        artist: String? = nil,
+        artwork: String? = nil
+    ) -> Bool {
         guard let player = preparePlayer(source: source, loop: loop, muted: false, autoplay: true) else {
             return false
         }
 
         player.volume = max(0, min(1, volume))
+        nowPlayingTitle = title?.isEmpty == false ? title : nil
+        nowPlayingArtist = artist?.isEmpty == false ? artist : nil
+        loadArtwork(from: artwork)
+        updateNowPlayingInfo()
 
         return true
     }
@@ -165,6 +187,7 @@ final class MediaPlayerManager: NSObject {
         guard let player = player, state == "playing" else { return }
         player.pause()
         state = "paused"
+        updateNowPlayingInfo()
     }
 
     func resume() {
@@ -174,6 +197,7 @@ final class MediaPlayerManager: NSObject {
         }
         player.play()
         state = "playing"
+        updateNowPlayingInfo()
     }
 
     func stop() {
@@ -186,9 +210,13 @@ final class MediaPlayerManager: NSObject {
     func seek(to seconds: Double) {
         guard let player = player else { return }
         let time = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
         if state == "ended" {
             state = "paused"
+        }
+        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.updateNowPlayingInfo()
+            }
         }
     }
 
@@ -222,6 +250,173 @@ final class MediaPlayerManager: NSObject {
         NotificationCenter.default.post(name: Self.slotDidChange, object: self)
     }
 
+    // MARK: - Now Playing & remote commands
+
+    private func configureRemoteCommands() {
+        let commands = MPRemoteCommandCenter.shared()
+
+        commands.playCommand.isEnabled = true
+        commands.playCommand.addTarget { [weak self] _ in
+            guard let self = self, self.player != nil else {
+                return .noActionableNowPlayingItem
+            }
+            DispatchQueue.main.async { self.resume() }
+            return .success
+        }
+
+        commands.pauseCommand.isEnabled = true
+        commands.pauseCommand.addTarget { [weak self] _ in
+            guard let self = self, self.player != nil else {
+                return .noActionableNowPlayingItem
+            }
+            DispatchQueue.main.async { self.pause() }
+            return .success
+        }
+
+        commands.togglePlayPauseCommand.isEnabled = true
+        commands.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self = self, self.player != nil else {
+                return .noActionableNowPlayingItem
+            }
+            DispatchQueue.main.async {
+                self.state == "playing" ? self.pause() : self.resume()
+            }
+            return .success
+        }
+
+        commands.skipForwardCommand.isEnabled = true
+        commands.skipForwardCommand.preferredIntervals = [15]
+        commands.skipForwardCommand.addTarget { [weak self] _ in
+            guard let self = self, let player = self.player else {
+                return .noActionableNowPlayingItem
+            }
+            let position = player.currentTime().seconds
+            DispatchQueue.main.async { self.seek(to: (position.isFinite ? position : 0) + 15) }
+            return .success
+        }
+
+        commands.skipBackwardCommand.isEnabled = true
+        commands.skipBackwardCommand.preferredIntervals = [15]
+        commands.skipBackwardCommand.addTarget { [weak self] _ in
+            guard let self = self, let player = self.player else {
+                return .noActionableNowPlayingItem
+            }
+            let position = player.currentTime().seconds
+            DispatchQueue.main.async { self.seek(to: max(0, (position.isFinite ? position : 0) - 15)) }
+            return .success
+        }
+
+        commands.changePlaybackPositionCommand.isEnabled = true
+        commands.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let self = self,
+                  self.player != nil,
+                  let positionEvent = event as? MPChangePlaybackPositionCommandEvent else {
+                return .noActionableNowPlayingItem
+            }
+            DispatchQueue.main.async { self.seek(to: positionEvent.positionTime) }
+            return .success
+        }
+    }
+
+    private func updateNowPlayingInfo() {
+        guard let player = player, let source = source, ownsPlayer else { return }
+
+        let position = player.currentTime().seconds
+        let duration = player.currentItem?.duration.seconds ?? 0
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: nowPlayingTitle ?? Self.fallbackTitle(for: source),
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: position.isFinite ? max(0, position) : 0,
+            MPNowPlayingInfoPropertyPlaybackRate: state == "playing" ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
+            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+            MPNowPlayingInfoPropertyExternalContentIdentifier: source,
+        ]
+
+        if let artist = nowPlayingArtist {
+            info[MPMediaItemPropertyArtist] = artist
+        }
+        if duration.isFinite, duration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = duration
+        }
+        if let artwork = nowPlayingArtwork {
+            info[MPMediaItemPropertyArtwork] = artwork
+        }
+
+        let center = MPNowPlayingInfoCenter.default()
+        center.nowPlayingInfo = info
+        center.playbackState = state == "playing" ? .playing : .paused
+    }
+
+    private func loadArtwork(from artwork: String?) {
+        artworkGeneration += 1
+        let generation = artworkGeneration
+        nowPlayingArtwork = nil
+
+        guard let artwork = artwork,
+              !artwork.isEmpty,
+              let url = Self.resolveURL(artwork) else { return }
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let data = try? Data(contentsOf: url), let image = UIImage(data: data) else { return }
+            let mediaArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+
+            DispatchQueue.main.async {
+                guard let self = self, self.artworkGeneration == generation else { return }
+                self.nowPlayingArtwork = mediaArtwork
+                self.updateNowPlayingInfo()
+            }
+        }
+    }
+
+    private static func fallbackTitle(for source: String) -> String {
+        guard let url = resolveURL(source), !url.lastPathComponent.isEmpty else { return source }
+        let filename = url.deletingPathExtension().lastPathComponent.removingPercentEncoding
+        return filename.flatMap { $0.isEmpty ? nil : $0 } ?? source
+    }
+
+    private func clearNowPlayingInfo() {
+        artworkGeneration += 1
+        nowPlayingTitle = nil
+        nowPlayingArtist = nil
+        nowPlayingArtwork = nil
+        let center = MPNowPlayingInfoCenter.default()
+        center.nowPlayingInfo = nil
+        center.playbackState = .stopped
+    }
+
+    // MARK: - Audio interruptions
+
+    private func observeAudioInterruptions() {
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleAudioInterruption(notification)
+        }
+    }
+
+    private func handleAudioInterruption(_ notification: Notification) {
+        guard let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: rawType) else { return }
+
+        switch type {
+        case .began:
+            shouldResumeAfterInterruption = state == "playing"
+            pause()
+        case .ended:
+            let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let options = AVAudioSession.InterruptionOptions(rawValue: rawOptions)
+            if shouldResumeAfterInterruption, options.contains(.shouldResume) {
+                activateAudioSession()
+                resume()
+            }
+            shouldResumeAfterInterruption = false
+        @unknown default:
+            break
+        }
+    }
+
     // MARK: - Helpers
 
     /// Set the playback audio session category before playing (mirrors the
@@ -236,9 +431,17 @@ final class MediaPlayerManager: NSObject {
         audioSessionConfigured = true
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-            try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
+            activateAudioSession()
         } catch {
             print("🎬 MediaPlayer: failed to configure audio session: \(error.localizedDescription)")
+        }
+    }
+
+    private func activateAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("🎬 MediaPlayer: failed to activate audio session: \(error.localizedDescription)")
         }
     }
 
@@ -277,8 +480,21 @@ final class MediaPlayerManager: NSObject {
         }
 
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-            if item.status == .failed {
-                self?.handleError(message: item.error?.localizedDescription ?? "Failed to load media")
+            DispatchQueue.main.async {
+                if item.status == .failed {
+                    self?.handleError(message: item.error?.localizedDescription ?? "Failed to load media")
+                } else if item.status == .readyToPlay {
+                    self?.updateNowPlayingInfo()
+                }
+            }
+        }
+
+        if let player = player {
+            timeObserver = player.addPeriodicTimeObserver(
+                forInterval: CMTime(seconds: 1, preferredTimescale: 1),
+                queue: .main
+            ) { [weak self] _ in
+                self?.updateNowPlayingInfo()
             }
         }
     }
@@ -291,6 +507,7 @@ final class MediaPlayerManager: NSObject {
         }
 
         state = "ended"
+        updateNowPlayingInfo()
 
         let payload: [String: Any] = ["source": source ?? ""]
         print("📤 Dispatching PlaybackEnded with source=\(source ?? "nil")")
@@ -299,6 +516,7 @@ final class MediaPlayerManager: NSObject {
 
     private func handleError(message: String) {
         state = "error"
+        updateNowPlayingInfo()
         dispatchError(source: source ?? "", message: message)
     }
 
@@ -323,6 +541,11 @@ final class MediaPlayerManager: NSObject {
         statusObservation?.invalidate()
         statusObservation = nil
 
+        if let timeObserver = timeObserver, let player = player {
+            player.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+
         player?.pause()
         if ownsPlayer {
             player?.replaceCurrentItem(with: nil)
@@ -331,5 +554,7 @@ final class MediaPlayerManager: NSObject {
         source = nil
         shouldLoop = false
         ownsPlayer = true
+        shouldResumeAfterInterruption = false
+        clearNowPlayingInfo()
     }
 }

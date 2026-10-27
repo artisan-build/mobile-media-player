@@ -7,7 +7,7 @@ class MediaPlayer
     /**
      * Start (or replace) playback of a file path or URL on the shared player.
      *
-     * @param  array{loop?: bool, volume?: float}  $options
+     * @param  array{loop?: bool, volume?: float, title?: string, artist?: string, artwork?: string}  $options
      */
     public function play(string $source, array $options = []): bool
     {
@@ -16,6 +16,9 @@ class MediaPlayer
                 'source' => $source,
                 'loop' => (bool) ($options['loop'] ?? false),
                 'volume' => (float) ($options['volume'] ?? 1.0),
+                'title' => isset($options['title']) ? (string) $options['title'] : null,
+                'artist' => isset($options['artist']) ? (string) $options['artist'] : null,
+                'artwork' => isset($options['artwork']) ? (string) $options['artwork'] : null,
             ]));
 
             if ($result) {
